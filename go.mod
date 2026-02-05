@@ -1,3 +1,3 @@
-module github.com/fosrl/badger
+module github.com/sparkeh/badger
 
 go 1.25
