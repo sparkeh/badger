@@ -2,7 +2,7 @@ displayName: Pangolin (Badger)
 type: middleware
 iconPath: .assets/icon.png
 
-import: github.com/fosrl/badger
+import: github.com/sparkeh/badger
 
 summary: Middleware auth bouncer for Pangolin
 
