@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/fosrl/badger/ips"
-	"github.com/fosrl/badger/version"
+	"github.com/sparkeh/badger/ips"
+	"github.com/sparkeh/badger/version"
 )
 
 type Config struct {
@@ -40,6 +40,7 @@ type Badger struct {
 	disableForwardAuth          bool
 	trustIP                     []*net.IPNet
 	customIPHeader              string
+	internalProxyNet            *net.IPNet
 }
 
 type VerifyBody struct {
@@ -131,6 +132,13 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 			badger.trustIP = append(badger.trustIP, trustip)
 		}
 	}
+
+	// Parse the internal proxy network (172.16.0.0/12)
+	_, internalProxyNet, err := net.ParseCIDR("172.16.0.0/12")
+	if err != nil {
+		return nil, err
+	}
+	badger.internalProxyNet = internalProxyNet
 
 	return badger, nil
 }
@@ -388,7 +396,23 @@ func (p *Badger) renderRedirectPage(redirectURL string) string {
 }
 
 func (p *Badger) getRealIP(req *http.Request) string {
-	// Check if request comes from a trusted source
+	// Check if request comes from internal proxy (172.16.0.0/12)
+	if p.isInternalProxy(req.RemoteAddr) {
+		// Extract the first IP from X-Forwarded-For (client's public IP)
+		if xffHeader := req.Header.Get(xForwardFor); xffHeader != "" {
+			// X-Forwarded-For can contain multiple IPs: "client, proxy1, proxy2"
+			// We want the first one (the original client IP)
+			ips := strings.Split(xffHeader, ",")
+			if len(ips) > 0 {
+				clientIP := strings.TrimSpace(ips[0])
+				if clientIP != "" {
+					return clientIP
+				}
+			}
+		}
+	}
+
+	// Check if request comes from a trusted source (Cloudflare)
 	isTrusted := p.isTrustedIP(req.RemoteAddr)
 
 	// If custom IP header is configured, use it
@@ -414,6 +438,19 @@ func (p *Badger) getRealIP(req *http.Request) string {
 	return ip
 }
 
+func (p *Badger) isInternalProxy(remoteAddr string) bool {
+	ipStr, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		// Try parsing without port
+		ipStr = remoteAddr
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	return p.internalProxyNet.Contains(ip)
+}
+
 func (p *Badger) isTrustedIP(remoteAddr string) bool {
 	ipStr, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
@@ -432,9 +469,15 @@ func (p *Badger) isTrustedIP(remoteAddr string) bool {
 }
 
 func (p *Badger) setIPHeaders(req *http.Request, realIP string) {
+	isInternalProxy := p.isInternalProxy(req.RemoteAddr)
 	isTrusted := p.isTrustedIP(req.RemoteAddr)
 
-	if isTrusted {
+	if isInternalProxy {
+		// Request from internal proxy - set headers with extracted client IP
+		req.Header.Set(xRealIP, realIP)
+		// Update X-Forwarded-For to only contain the real client IP
+		req.Header.Set(xForwardFor, realIP)
+	} else if isTrusted {
 		// Handle CF-Visitor header for scheme
 		if req.Header.Get(cfVisitor) != "" {
 			var cfVisitorValue struct {
